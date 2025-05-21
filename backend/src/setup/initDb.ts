@@ -20,10 +20,11 @@ const createTables = async () => {
   `);
   await db.query(`
     CREATE TABLE IF NOT EXISTS poll_votes (
-      id UUID PRIMARY KEY,
-      poll_id UUID REFERENCES polls(id) ON DELETE CASCADE,
-      user_id TEXT NOT NULL,
-      option_id UUID REFERENCES poll_options(id) ON DELETE CASCADE
+        id UUID PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        poll_id UUID REFERENCES polls(id) ON DELETE CASCADE,
+        option_id UUID REFERENCES poll_options(id) ON DELETE CASCADE,
+        UNIQUE(user_id, poll_id)
     );
   `);
 

@@ -3,6 +3,8 @@ import { db } from "../config/db.js";
 import { v4 as uuidv4 } from "uuid";
 import { requireAuth, AuthedRequest } from "../middleware/authMiddleware";
 import { getUserId } from "../controllers/authController.js";
+import { rateLimit } from "../middleware/rateLimitMiddleware.js";
+import { broadcastPollUpdate } from "../websocket/index.js";
 
 const router = Router();
 
@@ -23,17 +25,19 @@ router.post("/", async (req, res) => {
         [pollId, question, new Date(expiresAt)]
       );
   
-      const insertOptions = options.map((text: string) => ({
+      console.log("options", options);
+      
+      const insertOptions = options?.map((text: string) => ({
         id: uuidv4(),
         poll_id: pollId,
         text,
       }));
   
       const values = insertOptions
-        .map((o:unknown, i:number) => `($${i * 3 + 1}, $${i * 3 + 2}, $${i * 3 + 3})`)
-        .join(", ");
+        ?.map((o:unknown, i:number) => `($${i * 3 + 1}, $${i * 3 + 2}, $${i * 3 + 3})`)
+        ?.join(", ");
   
-      const params = insertOptions.flatMap((o:{id:string, poll_id:string,text:string}) => [o.id, o.poll_id, o.text]);
+      const params = insertOptions?.flatMap((o:{id:string, poll_id:string,text:string}) => [o.id, o.poll_id, o.text]);
   
       await db.query(
         `INSERT INTO poll_options (id, poll_id, text) VALUES ${values}`,
@@ -46,12 +50,12 @@ router.post("/", async (req, res) => {
     } catch (err) {
       await db.query("ROLLBACK");
       console.error(err);
-      res.status(500).json({ error: "Poll creation failed" });
+      res.status(500).json({ error: "Poll creation failed", err });
     }
   });
 
 // POST /poll/:id/vote
-router.post("/:id/vote", requireAuth, async (req: AuthedRequest, res) => {
+router.post("/:id/vote", requireAuth, rateLimit, async (req: AuthedRequest, res) => {
   const pollId = req.params.id;
   const { optionId } = req.body;
   const userId = getUserId(req?.headers?.authorization ?? '');
@@ -75,13 +79,34 @@ router.post("/:id/vote", requireAuth, async (req: AuthedRequest, res) => {
     );
 
     if (existingVote.rows.length > 0) {
-      await db.query("ROLLBACK");
-       res.status(200).json({ message: "Vote already cast" });
-    }
+        const previousOptionId = existingVote.rows?.[0]?.option_id
+        console.log("previousOptionId",previousOptionId, existingVote.rows);
+        
+        await db.query(
+            `UPDATE poll_votes SET option_id = $1 WHERE poll_id = $2 AND user_id = $3`,
+            [optionId,pollId, userId]
+          );
 
+          await db.query(
+            `UPDATE poll_options SET votes = votes + 1 WHERE id = $1`,
+            [optionId]
+          );
+
+          await db.query(
+            `UPDATE poll_options SET votes = votes - 1 WHERE id = $1`,
+            [previousOptionId]
+          );
+
+          await db.query("COMMIT");
+          broadcastPollUpdate(pollId)
+           res.status(200).json({ message: "Vote cast" });
+    //   await db.query("ROLLBACK");
+    //    res.status(200).json({ message: "Vote already cast" });
+    }
+    const voteId = uuidv4();
     await db.query(
-      `INSERT INTO poll_votes (poll_id, user_id, option_id) VALUES ($1, $2, $3)`,
-      [pollId, userId, optionId]
+      `INSERT INTO poll_votes (id, poll_id, user_id, option_id) VALUES ($1, $2, $3, $4)`,
+      [voteId, pollId, userId, optionId]
     );
 
     await db.query(
@@ -90,7 +115,7 @@ router.post("/:id/vote", requireAuth, async (req: AuthedRequest, res) => {
     );
 
     await db.query("COMMIT");
-
+    broadcastPollUpdate(pollId)
      res.status(200).json({ message: "Vote cast" });
   } catch (err) {
     await db.query("ROLLBACK");
